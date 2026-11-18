@@ -145,8 +145,9 @@
         <div class="seg" id="layerSeg" style="margin-top:9px;display:none">
           <button data-l="pred" class="on">Predicted</button>
           <button data-l="cur">Curated</button>
+          <button data-l="comb">Combined</button>
         </div>
-        <div class="hint" id="layerHint" style="margin-top:6px;display:none">Curated = literature/experimental network with regulation sign and PubMed references.</div>
+        <div class="hint" id="layerHint" style="margin-top:6px;display:none">Curated = literature/experimental network (sign + PubMed refs). Combined = predicted + curated merged, coloured by provenance.</div>
       </div>
       <div class="grp">
         <label>Load local data</label>
@@ -168,6 +169,7 @@
           <button data-m="conf">Confidence</button>
           <button data-m="btw">Bottleneck</button>
           <button data-m="sign" style="display:none">Regulation</button>
+          <button data-m="src" style="display:none">Source</button>
         </div>
         <div class="row">
           <button id="viewBackbone">TF→TF backbone</button>
@@ -175,6 +177,9 @@
         </div>
         <div class="row">
           <button id="viewTop10">Top 10 hubs (rank)</button>
+        </div>
+        <div class="row" id="litRow" style="display:none">
+          <button id="btnLit">Literature support</button>
         </div>
       </div>
       <div class="grp">
@@ -267,7 +272,7 @@
   let minConf=-1;   // confidence filter: hide edges with c < minConf
   let cmpB=null;    // second (prepped) genome for strain comparison
   function applyConfFilter(){ if(!cy) return;
-    if(G&&G.curated){ cy.batch(()=>cy.edges().forEach(e=>e.style('display','element'))); return; } // no confidence in curated layer
+    if(G&&(G.curated||G.combined)){ cy.batch(()=>cy.edges().forEach(e=>e.style('display','element'))); return; } // confidence filter n/a in curated/combined layers
     cy.batch(()=>cy.edges().forEach(e=>e.style('display',(e.data('c')>=minConf)?'element':'none'))); }
 
   // betweenness centrality (Brandes, directed unweighted); cached per genome
@@ -347,10 +352,12 @@
   }
   let curLayer='pred', curGid=null;
   function layerAvailable(id){ const m=manifest.find(x=>x.id===id); return !!(m&&m.curated); }
+  const LAYERSUF={cur:'.curated', comb:'.combined'};
   async function loadLayer(id, layer){
-    if(layer==='cur'){
-      if(EMB && EMB.data[id+'.curated']) return EMB.data[id+'.curated'];
-      return (await fetch('data/'+id+'.curated.json')).json();
+    const suf=LAYERSUF[layer];
+    if(suf){
+      if(EMB && EMB.data[id+suf]) return EMB.data[id+suf];
+      return (await fetch('data/'+id+suf+'.json')).json();
     }
     return loadGenome(id);
   }
@@ -362,7 +369,7 @@
   }
   async function openGenome(id, layer){
     curGid=id; curLayer=layer||'pred';
-    if(curLayer==='cur' && !layerAvailable(id)) curLayer='pred';
+    if((curLayer==='cur'||curLayer==='comb') && !layerAvailable(id)) curLayer='pred';
     document.getElementById('splash').style.display='flex';
     document.getElementById('splash').textContent='Loading '+id+'…';
     try{ showGenome(await loadLayer(id, curLayer)); }
@@ -371,28 +378,67 @@
   }
   document.querySelectorAll('#layerSeg button').forEach(b=>b.onclick=()=>{ if(curGid) openGenome(curGid, b.dataset.l); });
 
+  // ---------- predicted vs curated validation (literature support) ----------
+  let litOn=false, litMap=null, litMapId=null;
+  async function buildLitMap(id){
+    if(litMapId===id && litMap) return litMap;
+    const c=await loadLayer(id,'cur'); const ids=c.n.map(r=>r[0]);
+    const m=new Map();
+    c.e.forEach((e,ei)=>{ const k=ids[e[0]]+'>'+ids[e[1]];
+      m.set(k,{sign:e[2], pmids:e[3]||[], ev:(c.ev&&c.ev[ei])||''}); });
+    litMap=m; litMapId=id; return m;
+  }
+  function litStats(){
+    let conf=0; cy.edges().forEach(e=>{ if(litMap.has(e.data('source')+'>'+e.data('target'))) conf++; });
+    return {conf, curated:litMap.size, pred:cy.edges().length};
+  }
+  async function toggleLit(){
+    if(G.curated) return;
+    litOn=!litOn;
+    document.getElementById('btnLit').classList.toggle('on', litOn);
+    if(litOn){
+      await buildLitMap(curGid);
+      cy.batch(()=>cy.edges().forEach(e=>{
+        const m=litMap.get(e.data('source')+'>'+e.data('target'));
+        if(m){ e.style('line-color',SIGNCOL[m.sign]); e.style('target-arrow-color',SIGNCOL[m.sign]);
+          e.style('target-arrow-shape', m.sign==='r'?'tee':'triangle'); e.style('width',2.6); e.style('opacity',.95); e.style('z-index',9); }
+        else { e.style('opacity',.05); }
+      }));
+      const s=litStats();
+      document.getElementById('legend').innerHTML=
+        `<div class="k"><span class="dot" style="background:${SIGNCOL.a}"></span>Activation (literature)</div>
+         <div class="k"><span class="dot" style="background:${SIGNCOL.r}"></span>Repression (literature)</div>
+         <div class="hint" style="margin-top:8px"><b>${s.conf}</b> of ${s.pred} predicted interactions are supported by the curated network (${s.curated} curated interactions for this strain). Highlighted edges are coloured by the literature-reported sign; click one for its PubMed references. Toggle off to restore.</div>`;
+    } else {
+      applyMode(mode); applyConfFilter(); renderLegend();
+    }
+  }
+  document.getElementById('btnLit').onclick=toggleLit;
+
   function prep(raw){
     const ids = raw.n.map(r=>r[0]);
     const byId = new Map();
     raw.n.forEach(r=>byId.set(r[0],{id:r[0],tf:!!r[1],out:r[2],in:r[3],tier:r[4]}));
     const outAdj=new Map(), inAdj=new Map(); let maxOut=1;
     raw.n.forEach(r=>{ if(r[2]>maxOut)maxOut=r[2]; });
-    const curated=!!raw.curated;
-    const emeta={};                       // ei -> {s,t,sign,pmids}
+    const curated=!!raw.curated, combined=!!raw.combined;
+    const emeta={};                       // ei -> {s,t,sign,pmids,src}
     raw.e.forEach((e,ei)=>{
       const S=ids[e[0]], T=ids[e[1]];
-      const conf = curated ? 1 : e[2];    // numeric for width
-      const sign = curated ? e[2] : null; // 'a'/'r'/'d'/'u' in curated layer
-      (outAdj.get(S)||outAdj.set(S,[]).get(S)).push([T,conf,sign,ei]);
-      (inAdj.get(T)||inAdj.set(T,[]).get(T)).push([S,conf,sign,ei]);
-      if(curated) emeta[ei]={s:S,t:T,sign,pmids:e[3]||[]};
+      let conf=1, sign=null, src=null, pmids=null;
+      if(combined){ src=e[2]; conf=(e[3]==null?1:e[3]); sign=e[4]; pmids=e[5]||[]; }
+      else if(curated){ sign=e[2]; conf=1; pmids=e[3]||[]; }
+      else { conf=e[2]; }
+      (outAdj.get(S)||outAdj.set(S,[]).get(S)).push([T,conf,sign,ei,src]);
+      (inAdj.get(T)||inAdj.set(T,[]).get(T)).push([S,conf,sign,ei,src]);
+      if(curated||combined) emeta[ei]={s:S,t:T,sign,pmids:pmids||[],src};
     });
     const nmap = raw.names||{};
     const labelOf = id => (nmap[id] && nmap[id][0]) || id;
     const idByLabel = new Map();
     raw.n.forEach(r=>{ idByLabel.set(labelOf(r[0]), r[0]); });
     return {raw, ids, byId, outAdj, inAdj, maxOut, names:raw.names||null, labelOf, idByLabel,
-      curated, emeta, ev:raw.ev||{},
+      curated, combined, emeta, ev:raw.ev||{}, srccount:raw.srccount||null,
       isTF:new Set(raw.n.filter(r=>r[1]).map(r=>r[0])), stats:raw.stats, genome:raw.genome};
   }
   function regulonByLabel(g, tfLabel){
@@ -411,9 +457,9 @@
     const seen=new Set();
     G.outAdj.forEach((lst,S)=>{
       if(!G.isTF.has(S))return;
-      lst.forEach(([T,c,sign,ei])=>{
+      lst.forEach(([T,c,sign,ei,src])=>{
         if(G.isTF.has(T)&&T!==S){ const k=S+'>'+T; if(seen.has(k))return; seen.add(k);
-          els.push({data:{id:'e_'+k,source:S,target:T,c,sign:sign||null,ei:ei}}); }
+          els.push({data:{id:'e_'+k,source:S,target:T,c,sign:sign||null,ei:ei,src:src||null}}); }
       });
     });
     return els;
@@ -445,7 +491,11 @@
     });
     cy.on('zoom', updateLabels);
     cy.on('tap','node',ev=>focusNode(ev.target.id(), G.isTF.has(ev.target.id())));
-    cy.on('tap','edge',ev=>{ if(G.curated) openEdgeDrawer(ev.target); });
+    cy.on('tap','edge',ev=>{
+      if(G.curated||G.combined){ openEdgeDrawer(ev.target); return; }
+      if(litOn && litMap){ const k=ev.target.data('source')+'>'+ev.target.data('target'); const m=litMap.get(k);
+        if(m) edgeDetail(ev.target.data('source'), ev.target.data('target'), m.sign, m.pmids, m.ev); }
+    });
     cy.on('tap',ev=>{ if(ev.target===cy){ closeDrawer(); } });
   }
 
@@ -453,9 +503,18 @@
     G = prep(raw); curId = raw.genome; forceLabels=false;
     // "Regulation" color mode only applies to the curated layer
     const signBtn=document.querySelector('#mode button[data-m="sign"]');
-    if(signBtn){ signBtn.style.display = G.curated ? '' : 'none';
-      if(!G.curated && mode==='sign'){ mode='tier';
-        document.querySelectorAll('#mode button').forEach(x=>x.classList.toggle('on', x.dataset.m==='tier')); } }
+    if(signBtn){ signBtn.style.display = G.curated ? '' : 'none'; }
+    const srcBtn=document.querySelector('#mode button[data-m="src"]');
+    if(srcBtn){ srcBtn.style.display = G.combined ? '' : 'none'; }
+    // reset color mode if the current one is not valid for this layer
+    if((mode==='sign' && !G.curated) || (mode==='src' && !G.combined)){ mode='tier';
+      document.querySelectorAll('#mode button').forEach(x=>x.classList.toggle('on', x.dataset.m==='tier')); }
+    // default the combined layer to the Source colouring
+    if(G.combined && mode!=='src'){ mode='src';
+      document.querySelectorAll('#mode button').forEach(x=>x.classList.toggle('on', x.dataset.m==='src')); }
+    // "Literature support" only in the predicted layer of a strain that has a curated one
+    litOn=false; document.getElementById('btnLit').classList.remove('on');
+    document.getElementById('litRow').style.display = (!G.curated && !G.combined && layerAvailable(raw.genome)) ? '' : 'none';
     if(!cy) makeCy(); else cy.elements().remove();
     cy.add(backboneElements());
     applyMode(mode);
@@ -538,6 +597,11 @@
           e.style('target-arrow-color', SIGNCOL[s]||SIGNCOL.u);
           e.style('target-arrow-shape', s==='r'?'tee':'triangle');
           e.style('opacity', .8);
+        } else if(m==='src'){ const sc=e.data('src');
+          e.style('line-color', SRCCOL[sc]||'#243a5a');
+          e.style('target-arrow-color', SRCCOL[sc]||'#31517d');
+          e.style('target-arrow-shape', 'triangle');
+          e.style('opacity', sc==='p'?.4:.9); e.style('z-index', sc==='b'?9:(sc==='c'?5:1));
         } else {
           e.style('line-color', m==='conf'?confColor(e.data('c')):'#243a5a');
           e.style('target-arrow-color','#31517d'); e.style('target-arrow-shape','triangle'); e.style('opacity',.55);
@@ -548,6 +612,8 @@
   }
   const SIGNCOL={a:'#34d399', r:'#f87171', d:'#fbbf24', u:'#64748b'};
   const SIGNNAME={a:'Activation', r:'Repression', d:'Dual', u:'Unknown'};
+  const SRCCOL={p:'#3b82f6', c:'#c084fc', b:'#34d399'};
+  const SRCNAME={p:'Predicted only', c:'Curated only', b:'Both (confirmed)'};
   document.querySelectorAll('#mode button').forEach(b=>b.onclick=()=>{
     document.querySelectorAll('#mode button').forEach(x=>x.classList.remove('on'));
     b.classList.add('on'); applyMode(b.dataset.m); });
@@ -576,6 +642,12 @@
        <div class="k"><span class="dot" style="background:${SIGNCOL.d}"></span>Dual</div>
        <div class="k"><span class="dot" style="background:${SIGNCOL.u}"></span>Unknown</div>
        <div class="hint" style="margin-top:8px">Mode of regulation from the curated (literature) network. Click an edge to see its PubMed references and evidence.</div>`;
+    else if(mode==='src'){ const sc=G.srccount||{};
+      L.innerHTML=
+      `<div class="k"><span class="dot" style="background:${SRCCOL.b}"></span>Both — confirmed (${sc.b||0})</div>
+       <div class="k"><span class="dot" style="background:${SRCCOL.c}"></span>Curated only (${sc.c||0})</div>
+       <div class="k"><span class="dot" style="background:${SRCCOL.p}"></span>Predicted only (${sc.p||0})</div>
+       <div class="hint" style="margin-top:8px">Combined network: provenance of each interaction. "Both" = predicted and experimentally curated. Click an edge for its sign and references where available.</div>`; }
     else L.innerHTML=
       `<div class="bar" style="background:linear-gradient(90deg,#52525b,#92400e,#b45309,#d97706,#f5a524)"></div>
        <div class="barlab"><span>TU only</span><span>4 organisms</span></div>
@@ -584,11 +656,11 @@
 
   function expandRegulon(id){
     const outs=(G.outAdj.get(id)||[]); const add=[];
-    outs.forEach(([T,c,sign,ei])=>{
+    outs.forEach(([T,c,sign,ei,src])=>{
       if(T===id)return;
       if(cy.getElementById(T).empty()) add.push(mkNode(T, G.byId.get(T)));
       if(cy.getElementById('r_'+id+'>'+T).empty())
-        add.push({data:{id:'r_'+id+'>'+T,source:id,target:T,c,sign:sign||null,ei:ei}});
+        add.push({data:{id:'r_'+id+'>'+T,source:id,target:T,c,sign:sign||null,ei:ei,src:src||null}});
     });
     if(add.length) cy.add(add);
     applyMode(mode);
@@ -617,21 +689,27 @@
   function closeDrawer(){ drawer.classList.remove('open'); if(cy) cy.elements().removeClass('hot faded'); }
   function openEdgeDrawer(edge){
     const ei=edge.data('ei'); const meta=(G.emeta&&ei!=null)?G.emeta[ei]:null; if(!meta)return;
-    const s=meta.s, t=meta.t, sign=meta.sign, pmids=meta.pmids||[];
-    const ev=(G.ev&&ei!=null)?G.ev[ei]:'';
-    document.getElementById('dacc').innerHTML=`${dispOf(s)} <span style="color:${SIGNCOL[sign]}">${sign==='r'?'⊣':(sign==='a'?'→':'·')}</span> ${dispOf(t)}`;
-    const tag=document.getElementById('dtag'); tag.textContent=SIGNNAME[sign]||'Unknown';
-    tag.style.background=SIGNCOL[sign]||SIGNCOL.u; tag.style.color='#04121f';
+    edgeDetail(meta.s, meta.t, meta.sign, meta.pmids||[], (G.ev&&ei!=null)?G.ev[ei]:'', meta.src);
+  }
+  function edgeDetail(s, t, sign, pmids, ev, src){
+    const arrow = sign==='r'?'⊣':(sign==='a'?'→':'·');
+    document.getElementById('dacc').innerHTML=`${dispOf(s)} <span style="color:${SIGNCOL[sign]||'#8ea3c0'}">${arrow}</span> ${dispOf(t)}`;
+    const tag=document.getElementById('dtag');
+    if(src){ tag.textContent=SRCNAME[src]; tag.style.background=SRCCOL[src]; }
+    else { tag.textContent=SIGNNAME[sign]||'Unknown'; tag.style.background=SIGNCOL[sign]||SIGNCOL.u; }
+    tag.style.color='#04121f';
     const refs=pmids.length
       ? pmids.map(p=>`<a href="https://pubmed.ncbi.nlm.nih.gov/${p}/" target="_blank" rel="noopener" style="color:var(--inter);text-decoration:none">${p}</a>`).join(', ')
       : '—';
+    const isPredOnly = src==='p';
     document.getElementById('dbody').innerHTML=`
       <div class="stat"><span>Regulator</span><span class="v">${dispOf(s)}</span></div>
       <div class="stat"><span>Target</span><span class="v">${dispOf(t)}</span></div>
-      <div class="stat"><span>Mode</span><span class="v" style="color:${SIGNCOL[sign]}">${SIGNNAME[sign]||'Unknown'}</span></div>
-      <h4>PubMed reference(s)</h4><div style="font-size:12px;line-height:1.8">${refs}</div>
-      ${ev?`<h4>Evidence</h4><div style="font-size:12px;line-height:1.5;color:var(--dim)">${ev}${ev.length>=270?'…':''}</div>`:''}
-      <div class="hint" style="margin-top:14px">Curated interaction (literature-reported). Click a node for its details, or the background to close.</div>`;
+      ${src?`<div class="stat"><span>Source</span><span class="v" style="color:${SRCCOL[src]}">${SRCNAME[src]}</span></div>`:''}
+      ${!isPredOnly?`<div class="stat"><span>Mode</span><span class="v" style="color:${SIGNCOL[sign]||'#8ea3c0'}">${SIGNNAME[sign]||'Unknown'}</span></div>`:''}
+      ${!isPredOnly?`<h4>PubMed reference(s)</h4><div style="font-size:12px;line-height:1.8">${refs}</div>`:''}
+      ${(!isPredOnly&&ev)?`<h4>Evidence</h4><div style="font-size:12px;line-height:1.5;color:var(--dim)">${ev}${ev.length>=270?'…':''}</div>`:''}
+      <div class="hint" style="margin-top:14px">${isPredOnly?'Predicted interaction (orthology-based), without curated support.':'Curated interaction (literature-reported).'} Click a node for its details, or the background to close.</div>`;
     drawer.classList.add('open');
   }
   function openDrawer(id){
