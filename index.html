@@ -181,6 +181,9 @@
         <div class="row" id="litRow" style="display:none">
           <button id="btnLit">Literature support</button>
         </div>
+        <div class="row" id="combRow" style="display:none">
+          <button id="btnCombExp">Only curated / confirmed</button>
+        </div>
       </div>
       <div class="grp">
         <label>Confidence filter</label>
@@ -415,6 +418,25 @@
   }
   document.getElementById('btnLit').onclick=toggleLit;
 
+  // ---------- Combined layer: show only curated/confirmed ----------
+  let combOnlyExp=false;
+  function applyCombFilter(){
+    if(!cy||!G||!G.combined) return;
+    cy.batch(()=>{
+      cy.edges().forEach(e=> e.style('display', (combOnlyExp && e.data('src')==='p')?'none':'element'));
+      cy.nodes().forEach(n=>{
+        if(!combOnlyExp){ n.style('display','element'); return; }
+        const keep=n.connectedEdges().some(e=>e.data('src')!=='p');
+        n.style('display', keep?'element':'none');
+      });
+    });
+  }
+  document.getElementById('btnCombExp').onclick=()=>{
+    combOnlyExp=!combOnlyExp;
+    document.getElementById('btnCombExp').classList.toggle('on', combOnlyExp);
+    applyCombFilter();
+  };
+
   function prep(raw){
     const ids = raw.n.map(r=>r[0]);
     const byId = new Map();
@@ -452,17 +474,20 @@
   const mkNode = (id,n)=>({data:{id,disp:dispOf(id),out:n.out,ind:n.in,tier:n.tier,tf:n.tf?1:0}});
 
   function backboneElements(){
-    const els=[];
-    G.raw.n.forEach(r=>{ if(r[1]) els.push({data:{id:r[0],disp:dispOf(r[0]),out:r[2],ind:r[3],tier:r[4],tf:1}}); });
-    const seen=new Set();
+    const edgeEls=[], used=new Set(), seen=new Set();
     G.outAdj.forEach((lst,S)=>{
       if(!G.isTF.has(S))return;
       lst.forEach(([T,c,sign,ei,src])=>{
         if(G.isTF.has(T)&&T!==S){ const k=S+'>'+T; if(seen.has(k))return; seen.add(k);
-          els.push({data:{id:'e_'+k,source:S,target:T,c,sign:sign||null,ei:ei,src:src||null}}); }
+          edgeEls.push({data:{id:'e_'+k,source:S,target:T,c,sign:sign||null,ei:ei,src:src||null}});
+          used.add(S); used.add(T); }
       });
     });
-    return els;
+    // only draw TFs that have at least one TF→TF edge (hide isolated nodes)
+    const nodeEls=[];
+    G.raw.n.forEach(r=>{ if(r[1] && used.has(r[0]))
+      nodeEls.push({data:{id:r[0],disp:dispOf(r[0]),out:r[2],ind:r[3],tier:r[4],tf:1}}); });
+    return nodeEls.concat(edgeEls);
   }
 
   function makeCy(){
@@ -486,6 +511,7 @@
         {selector:'.faded',style:{'opacity':.08}},
         {selector:'.gofade',style:{'opacity':.12}},
         {selector:'edge.hot',style:{'line-color':'#f472b6','opacity':.95,'width':2,'target-arrow-color':'#f472b6','z-index':9}},
+        {selector:'edge.hotsoft',style:{'line-color':'#f472b6','opacity':.26,'width':0.6,'target-arrow-color':'#f472b6','z-index':3}},
         {selector:'node.hot',style:{'border-width':3,'border-color':'#f472b6','text-opacity':.95}}
       ]
     });
@@ -515,11 +541,15 @@
     // "Literature support" only in the predicted layer of a strain that has a curated one
     litOn=false; document.getElementById('btnLit').classList.remove('on');
     document.getElementById('litRow').style.display = (!G.curated && !G.combined && layerAvailable(raw.genome)) ? '' : 'none';
+    // Combined opens already filtered to the curated/confirmed core (toggle off for the predicted backdrop)
+    combOnlyExp = !!G.combined;
+    document.getElementById('btnCombExp').classList.toggle('on', combOnlyExp);
+    document.getElementById('combRow').style.display = G.combined ? '' : 'none';
     if(!cy) makeCy(); else cy.elements().remove();
     cy.add(backboneElements());
     applyMode(mode);
     cy.layout({name:'cose',animate:false,nodeRepulsion:9000,idealEdgeLength:60,padding:40}).run();
-    cy.fit(undefined,50); updateLabels(); applyConfFilter();
+    cy.fit(undefined,50); updateLabels(); applyConfFilter(); applyCombFilter();
     document.getElementById('splash').style.display='none';
     const gLabel = raw.label ? `<b>${raw.label}</b> <span style="opacity:.6" class="mono">(${raw.genome})</span>` : `<b class="mono">${raw.genome}</b>`;
     document.getElementById('hud').innerHTML =
@@ -589,19 +619,24 @@
           n.style('background-color', o===0?'#33465f':hsl2rgb(38-6*t,0.92,0.40+0.34*t)); }
         else if(m==='btw'){ const b=G.btw.get(n.data('id'))||0, t=b/G.maxBtw;
           n.style('background-color', b===0?'#2b3443':hsl2rgb(155,0.6,0.30+0.42*Math.sqrt(t))); }
+        else if(m==='src') n.style('background-color', tierColor[n.data('tier')]||'#5b6b86'); // keep TF identity (green)
         else n.style('background-color','#33465f');
       });
       cy.edges().forEach(e=>{
+        e.removeStyle('width');
         if(m==='sign'){ const s=e.data('sign');
           e.style('line-color', SIGNCOL[s]||SIGNCOL.u);
           e.style('target-arrow-color', SIGNCOL[s]||SIGNCOL.u);
           e.style('target-arrow-shape', s==='r'?'tee':'triangle');
           e.style('opacity', .8);
         } else if(m==='src'){ const sc=e.data('src');
-          e.style('line-color', SRCCOL[sc]||'#243a5a');
-          e.style('target-arrow-color', SRCCOL[sc]||'#31517d');
-          e.style('target-arrow-shape', 'triangle');
-          e.style('opacity', sc==='p'?.4:.9); e.style('z-index', sc==='b'?9:(sc==='c'?5:1));
+          if(sc==='p'){ // predicted-only: faint thin backdrop
+            e.style('line-color','#2b3a52'); e.style('target-arrow-color','#2b3a52');
+            e.style('width',0.6); e.style('opacity',.16); e.style('z-index',1); e.style('target-arrow-shape','triangle');
+          } else { const col=SRCCOL[sc]; // curated / confirmed: bright and bold
+            e.style('line-color',col); e.style('target-arrow-color',col);
+            e.style('width', sc==='b'?2.8:2); e.style('opacity',.97); e.style('z-index', sc==='b'?10:6); e.style('target-arrow-shape','triangle');
+          }
         } else {
           e.style('line-color', m==='conf'?confColor(e.data('c')):'#243a5a');
           e.style('target-arrow-color','#31517d'); e.style('target-arrow-shape','triangle'); e.style('opacity',.55);
@@ -666,7 +701,7 @@
     applyMode(mode);
     cy.layout({name:'concentric',concentric:n=>n.id()===id?10:1,levelWidth:()=>1,
       minNodeSpacing:14,animate:true,animationDuration:400,boundingBox:cy.extent(),fit:false}).run();
-    updateLabels(); applyConfFilter();
+    updateLabels(); applyConfFilter(); applyCombFilter();
   }
   function focusNode(id,expand){
     if(!G.byId.has(id))return;
@@ -678,15 +713,17 @@
     openDrawer(id);
   }
   function highlight(id){
-    cy.elements().removeClass('hot faded');
+    cy.elements().removeClass('hot hotsoft faded');
     const touch=cy.getElementById(id).connectedEdges();
     const nbr=touch.connectedNodes().union(cy.getElementById(id));
     cy.elements().not(nbr).not(touch).addClass('faded');
-    touch.addClass('hot'); cy.getElementById(id).addClass('hot');
+    // large regulons: soft, thin accent so the fan doesn't flood the canvas
+    touch.addClass(touch.length>40?'hotsoft':'hot');
+    cy.getElementById(id).addClass('hot');
   }
 
   const drawer=document.getElementById('drawer');
-  function closeDrawer(){ drawer.classList.remove('open'); if(cy) cy.elements().removeClass('hot faded'); }
+  function closeDrawer(){ drawer.classList.remove('open'); if(cy) cy.elements().removeClass('hot hotsoft faded'); }
   function openEdgeDrawer(edge){
     const ei=edge.data('ei'); const meta=(G.emeta&&ei!=null)?G.emeta[ei]:null; if(!meta)return;
     edgeDetail(meta.s, meta.t, meta.sign, meta.pmids||[], (G.ev&&ei!=null)?G.ev[ei]:'', meta.src);
@@ -769,10 +806,10 @@
     forceLabels=false;
     cy.elements().remove(); cy.add(backboneElements()); applyMode(mode);
     cy.layout({name:'cose',animate:false,nodeRepulsion:9000,idealEdgeLength:60,padding:40}).run();
-    cy.fit(undefined,50); updateLabels(); applyConfFilter();
+    cy.fit(undefined,50); updateLabels(); applyConfFilter(); applyCombFilter();
     document.querySelectorAll('#tophubs li').forEach(li=>{li.style.borderLeft='';li.style.paddingLeft='';});
     closeDrawer(); };
-  document.getElementById('viewReset').onclick=()=>{ if(cy){cy.fit(undefined,50);cy.elements().removeClass('hot faded');} };
+  document.getElementById('viewReset').onclick=()=>{ if(cy){cy.fit(undefined,50);cy.elements().removeClass('hot hotsoft faded');} };
 
   // ---------- export ----------
   function download(name, blob){
@@ -820,7 +857,7 @@
     cy.batch(()=>cy.nodes().forEach(nd=>
       nd.style('background-color', rampColor((nd.data('rank')-1)/denom)) ));
     cy.layout({name:'preset',fit:true,padding:70}).run();
-    updateLabels(); applyConfFilter();
+    updateLabels(); applyConfFilter(); applyCombFilter();
     renderTop10Legend(top);
     document.querySelectorAll('#tophubs li').forEach((li,i)=>{
       li.style.borderLeft = i<top.length ? ('3px solid '+rampColor(i/denom)) : '';
@@ -861,7 +898,7 @@
     cy.batch(()=>cy.nodes().forEach(nd=>{ const l=nd.data('lvl');
       nd.style('background-color', l===0?'#f472b6':rampColor(maxL?l/maxL:0)); }));
     cy.layout({name:'breadthfirst',directed:true,roots:[root],spacingFactor:1.1,padding:40,animate:false}).run();
-    cy.fit(undefined,50); updateLabels(); applyConfFilter();
+    cy.fit(undefined,50); updateLabels(); applyConfFilter(); applyCombFilter();
     const bar='linear-gradient(90deg,#f472b6,'+[0,.25,.5,.75,1].map(rampColor).join(',')+')';
     document.getElementById('legend').innerHTML=
       `<div class="bar" style="background:${bar}"></div>
