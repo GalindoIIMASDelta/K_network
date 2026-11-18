@@ -41,8 +41,11 @@
   #glist .gi:last-child{border-bottom:none}
   #glist .gi:hover{background:#17263e}
   #glist .gi.on{background:var(--inter);color:#04121f}
-  #glist .gi .e{color:var(--faint);font-variant-numeric:tabular-nums}
+  #glist .gi .e{color:var(--faint);font-variant-numeric:tabular-nums;flex:none}
   #glist .gi.on .e{color:#04121f}
+  #glist .gi .gname{display:flex;flex-direction:column;gap:1px;min-width:0}
+  #glist .gi .gsub{font-size:9.5px;color:var(--faint)}
+  #glist .gi.on .gsub{color:#0a2238}
   .seg{display:flex;background:var(--rail2);border:1px solid var(--line);
     border-radius:8px;padding:3px;gap:3px}
   .seg button{flex:1;background:none;border:none;color:var(--dim);white-space:nowrap;
@@ -139,6 +142,11 @@
         <label>Genome</label>
         <input class="f mono" id="gfilter" placeholder="filter by accession…" autocomplete="off">
         <div id="glist"></div>
+        <div class="seg" id="layerSeg" style="margin-top:9px;display:none">
+          <button data-l="pred" class="on">Predicted</button>
+          <button data-l="cur">Curated</button>
+        </div>
+        <div class="hint" id="layerHint" style="margin-top:6px;display:none">Curated = literature/experimental network with regulation sign and PubMed references.</div>
       </div>
       <div class="grp">
         <label>Load local data</label>
@@ -159,6 +167,7 @@
           <button data-m="hub">Hub</button>
           <button data-m="conf">Confidence</button>
           <button data-m="btw">Bottleneck</button>
+          <button data-m="sign" style="display:none">Regulation</button>
         </div>
         <div class="row">
           <button id="viewBackbone">TF→TF backbone</button>
@@ -211,6 +220,15 @@
         <div class="row"><button id="openHeatmap">Family heatmap</button></div>
         <div class="hint" style="margin-top:7px">Are the top hubs the same TF family across organisms? Pfam-based.</div>
       </div>
+      <div class="grp">
+        <label>Gene Ontology</label>
+        <div class="seg" id="goMode">
+          <button data-g="off" class="on">Off</button>
+          <button data-g="color">Color by GO</button>
+        </div>
+        <select class="f" id="goFilter" style="margin-top:9px"><option value="">All GO terms</option></select>
+        <div class="hint" id="goHint" style="margin-top:7px">No GO annotation loaded yet. Regenerate with GO terms per gene to color and filter nodes by biological function.</div>
+      </div>
     </div>
   </aside>
 
@@ -231,7 +249,7 @@
 (function(){
   const EMB = window.EMBEDDED || null;   // self-contained demo if present
   const tierName = ['Master TF','Intermediate TF','Target gene'];
-  const tierColor = ['#16a34a','#4ade80','#5b6b86'];  // master TF (dark green), intermediate TF (light green), target (grey)
+  const tierColor = ['#16a34a','#4ade80','#3b82f6'];  // master TF (dark green), intermediate TF (light green), target gene (blue)
   const confColor = c => c<0 ? '#52525b' : ['#52525b','#92400e','#b45309','#d97706','#f5a524'][Math.min(c,4)];
   // HSL -> rgb() string, because Cytoscape does not parse space-separated hsl().
   function hsl2rgb(h,s,l){
@@ -249,6 +267,7 @@
   let minConf=-1;   // confidence filter: hide edges with c < minConf
   let cmpB=null;    // second (prepped) genome for strain comparison
   function applyConfFilter(){ if(!cy) return;
+    if(G&&G.curated){ cy.batch(()=>cy.edges().forEach(e=>e.style('display','element'))); return; } // no confidence in curated layer
     cy.batch(()=>cy.edges().forEach(e=>e.style('display',(e.data('c')>=minConf)?'element':'none'))); }
 
   // betweenness centrality (Brandes, directed unweighted); cached per genome
@@ -282,6 +301,41 @@
 
   // display label / function come from GFF-derived names, if present
   const dispOf = id => (G.names && G.names[id] && G.names[id][0]) || id;
+
+  // Literature-reported regulatory function of global regulators, transferred by
+  // orthology to characterized E. coli / Enterobacteriaceae TFs. This is prior
+  // knowledge, NOT a statistical enrichment computed on these networks.
+  // Keyed by lowercased gene symbol (suffixes like _1/_2 stripped).
+  const LITFUNC = {
+    crp:["Carbon-source utilization and catabolite repression; activates catabolism of alternative carbon sources","1"],
+    fnr:["Master regulator of the aerobic–anaerobic transition; anaerobic respiration and energy metabolism","1"],
+    fur:["Iron homeostasis; represses iron-uptake and siderophore genes under iron-replete conditions (in Klebsiella also linked to capsule and virulence via RyhB)","2"],
+    fis:["Nucleoid-associated, growth-phase-dependent regulation; stable-RNA (rRNA/tRNA) transcription and DNA topology","1"],
+    arca:["Anaerobic respiratory control (ArcAB two-component system); represses aerobic respiratory and TCA-cycle genes under low oxygen","1"],
+    lrp:["Leucine-responsive feast/famine regulator; amino-acid metabolism and fimbrial/pilus genes","1"],
+    narl:["Nitrate/nitrite respiratory regulation (NarXL two-component system)","3"],
+    narp:["Nitrate/nitrite respiratory regulation (NarQP two-component system)","3"],
+    cytr:["Nucleoside and pyrimidine catabolism (acts with CRP)","3"],
+    cra:["Central carbon metabolism; balance of glycolysis vs gluconeogenesis","3"],
+    phob:["Phosphate-starvation response (Pho regulon)","3"],
+    phop:["Mg2+ sensing and envelope stress (PhoPQ); LPS modification, antimicrobial-peptide resistance and virulence","3"],
+    lexa:["SOS DNA-damage response (repressor)","3"],
+    soxs:["Superoxide/oxidative-stress response and multidrug efflux (SoxRS)","3"],
+    oxyr:["Hydrogen-peroxide/oxidative-stress response","3"],
+    nsrr:["Nitric-oxide / nitrosative-stress response","3"],
+    zur:["Zinc homeostasis","3"],
+    ihfa:["Nucleoid-associated architectural regulator (DNA bending); broad effects","1"],
+    ihfb:["Nucleoid-associated architectural regulator (DNA bending); broad effects","1"],
+    hns:["Xenogeneic silencing and nucleoid organization","1"],
+    rcsb:["Rcs phosphorelay response regulator; capsule synthesis and envelope stress (prominent in Klebsiella)","3"],
+  };
+  const LITREF = {
+    "1":"Martínez-Antonio & Collado-Vides, Curr Opin Microbiol 2003",
+    "2":"Huang et al., Fur/RyhB regulon in Klebsiella pneumoniae, 2012",
+    "3":"RegulonDB / EcoCyc (E. coli K-12 regulon annotations)",
+  };
+  const normSym = s => (s||'').replace(/[_.\-]\d+$/,'').toLowerCase();
+  const litFuncOf = sym => LITFUNC[normSym(sym)] || null;
   const prodOf = id => (G.names && G.names[id] && G.names[id][1]) || '';
 
   async function loadManifest(){ if(EMB) return EMB.manifest; return (await fetch('manifest.json')).json(); }
@@ -291,6 +345,31 @@
     if(EMB && EMB.data[id]) return EMB.data[id];
     return (await fetch('data/'+id+'.json')).json();
   }
+  let curLayer='pred', curGid=null;
+  function layerAvailable(id){ const m=manifest.find(x=>x.id===id); return !!(m&&m.curated); }
+  async function loadLayer(id, layer){
+    if(layer==='cur'){
+      if(EMB && EMB.data[id+'.curated']) return EMB.data[id+'.curated'];
+      return (await fetch('data/'+id+'.curated.json')).json();
+    }
+    return loadGenome(id);
+  }
+  function updateLayerUI(id){
+    const seg=document.getElementById('layerSeg'), hint=document.getElementById('layerHint');
+    const has=layerAvailable(id);
+    seg.style.display=has?'':'none'; hint.style.display=has?'':'none';
+    seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on', b.dataset.l===(has?curLayer:'pred')));
+  }
+  async function openGenome(id, layer){
+    curGid=id; curLayer=layer||'pred';
+    if(curLayer==='cur' && !layerAvailable(id)) curLayer='pred';
+    document.getElementById('splash').style.display='flex';
+    document.getElementById('splash').textContent='Loading '+id+'…';
+    try{ showGenome(await loadLayer(id, curLayer)); }
+    catch(err){ document.getElementById('splash').textContent='Could not load '+id; return; }
+    updateLayerUI(id); renderGList(document.getElementById('gfilter').value);
+  }
+  document.querySelectorAll('#layerSeg button').forEach(b=>b.onclick=()=>{ if(curGid) openGenome(curGid, b.dataset.l); });
 
   function prep(raw){
     const ids = raw.n.map(r=>r[0]);
@@ -298,16 +377,22 @@
     raw.n.forEach(r=>byId.set(r[0],{id:r[0],tf:!!r[1],out:r[2],in:r[3],tier:r[4]}));
     const outAdj=new Map(), inAdj=new Map(); let maxOut=1;
     raw.n.forEach(r=>{ if(r[2]>maxOut)maxOut=r[2]; });
-    raw.e.forEach(([s,t,c])=>{
-      const S=ids[s], T=ids[t];
-      (outAdj.get(S)||outAdj.set(S,[]).get(S)).push([T,c]);
-      (inAdj.get(T)||inAdj.set(T,[]).get(T)).push([S,c]);
+    const curated=!!raw.curated;
+    const emeta={};                       // ei -> {s,t,sign,pmids}
+    raw.e.forEach((e,ei)=>{
+      const S=ids[e[0]], T=ids[e[1]];
+      const conf = curated ? 1 : e[2];    // numeric for width
+      const sign = curated ? e[2] : null; // 'a'/'r'/'d'/'u' in curated layer
+      (outAdj.get(S)||outAdj.set(S,[]).get(S)).push([T,conf,sign,ei]);
+      (inAdj.get(T)||inAdj.set(T,[]).get(T)).push([S,conf,sign,ei]);
+      if(curated) emeta[ei]={s:S,t:T,sign,pmids:e[3]||[]};
     });
     const nmap = raw.names||{};
     const labelOf = id => (nmap[id] && nmap[id][0]) || id;
     const idByLabel = new Map();
     raw.n.forEach(r=>{ idByLabel.set(labelOf(r[0]), r[0]); });
     return {raw, ids, byId, outAdj, inAdj, maxOut, names:raw.names||null, labelOf, idByLabel,
+      curated, emeta, ev:raw.ev||{},
       isTF:new Set(raw.n.filter(r=>r[1]).map(r=>r[0])), stats:raw.stats, genome:raw.genome};
   }
   function regulonByLabel(g, tfLabel){
@@ -326,9 +411,9 @@
     const seen=new Set();
     G.outAdj.forEach((lst,S)=>{
       if(!G.isTF.has(S))return;
-      lst.forEach(([T,c])=>{
+      lst.forEach(([T,c,sign,ei])=>{
         if(G.isTF.has(T)&&T!==S){ const k=S+'>'+T; if(seen.has(k))return; seen.add(k);
-          els.push({data:{id:'e_'+k,source:S,target:T,c}}); }
+          els.push({data:{id:'e_'+k,source:S,target:T,c,sign:sign||null,ei:ei}}); }
       });
     });
     return els;
@@ -353,31 +438,40 @@
           'transition-property':'line-color,opacity','transition-duration':'140ms'}},
         {selector:'node:selected',style:{'border-width':3,'border-color':'#f472b6'}},
         {selector:'.faded',style:{'opacity':.08}},
+        {selector:'.gofade',style:{'opacity':.12}},
         {selector:'edge.hot',style:{'line-color':'#f472b6','opacity':.95,'width':2,'target-arrow-color':'#f472b6','z-index':9}},
         {selector:'node.hot',style:{'border-width':3,'border-color':'#f472b6','text-opacity':.95}}
       ]
     });
     cy.on('zoom', updateLabels);
     cy.on('tap','node',ev=>focusNode(ev.target.id(), G.isTF.has(ev.target.id())));
+    cy.on('tap','edge',ev=>{ if(G.curated) openEdgeDrawer(ev.target); });
     cy.on('tap',ev=>{ if(ev.target===cy){ closeDrawer(); } });
   }
 
   function showGenome(raw){
     G = prep(raw); curId = raw.genome; forceLabels=false;
+    // "Regulation" color mode only applies to the curated layer
+    const signBtn=document.querySelector('#mode button[data-m="sign"]');
+    if(signBtn){ signBtn.style.display = G.curated ? '' : 'none';
+      if(!G.curated && mode==='sign'){ mode='tier';
+        document.querySelectorAll('#mode button').forEach(x=>x.classList.toggle('on', x.dataset.m==='tier')); } }
     if(!cy) makeCy(); else cy.elements().remove();
     cy.add(backboneElements());
     applyMode(mode);
     cy.layout({name:'cose',animate:false,nodeRepulsion:9000,idealEdgeLength:60,padding:40}).run();
     cy.fit(undefined,50); updateLabels(); applyConfFilter();
     document.getElementById('splash').style.display='none';
+    const gLabel = raw.label ? `<b>${raw.label}</b> <span style="opacity:.6" class="mono">(${raw.genome})</span>` : `<b class="mono">${raw.genome}</b>`;
     document.getElementById('hud').innerHTML =
-      `<b class="mono">${raw.genome}</b> · <b>${G.stats.tfs}</b> TFs · <b>${G.stats.targets}</b> target genes · <b>${G.stats.edges}</b> interactions`;
+      `${gLabel} · <b>${G.stats.tfs}</b> TFs · <b>${G.stats.targets}</b> target genes · <b>${G.stats.edges}</b> interactions`;
     const top=[...G.byId.values()].sort((a,b)=>b.out-a.out).slice(0,12);
     document.getElementById('tophubs').innerHTML = top.map(n=>
       `<li data-id="${n.id}" title="${n.id}"><span class="nm">${dispOf(n.id)}</span><span class="deg">${n.out}</span></li>`).join('');
     document.querySelectorAll('#tophubs li').forEach(li=>li.onclick=()=>focusNode(li.dataset.id,true));
     renderTopology();
     populateCmp();
+    setupGO(raw);
     closeDrawer();
     { const g=G; setTimeout(()=>ensureBetweenness(g), 60); }   // precompute in background
   }
@@ -438,10 +532,22 @@
           n.style('background-color', b===0?'#2b3443':hsl2rgb(155,0.6,0.30+0.42*Math.sqrt(t))); }
         else n.style('background-color','#33465f');
       });
-      cy.edges().forEach(e=> e.style('line-color', m==='conf'?confColor(e.data('c')):'#243a5a'));
+      cy.edges().forEach(e=>{
+        if(m==='sign'){ const s=e.data('sign');
+          e.style('line-color', SIGNCOL[s]||SIGNCOL.u);
+          e.style('target-arrow-color', SIGNCOL[s]||SIGNCOL.u);
+          e.style('target-arrow-shape', s==='r'?'tee':'triangle');
+          e.style('opacity', .8);
+        } else {
+          e.style('line-color', m==='conf'?confColor(e.data('c')):'#243a5a');
+          e.style('target-arrow-color','#31517d'); e.style('target-arrow-shape','triangle'); e.style('opacity',.55);
+        }
+      });
     });
     renderLegend();
   }
+  const SIGNCOL={a:'#34d399', r:'#f87171', d:'#fbbf24', u:'#64748b'};
+  const SIGNNAME={a:'Activation', r:'Repression', d:'Dual', u:'Unknown'};
   document.querySelectorAll('#mode button').forEach(b=>b.onclick=()=>{
     document.querySelectorAll('#mode button').forEach(x=>x.classList.remove('on'));
     b.classList.add('on'); applyMode(b.dataset.m); });
@@ -464,6 +570,12 @@
       `<div class="bar" style="background:linear-gradient(90deg,#2b3443,${hsl2rgb(155,.6,.5)},${hsl2rgb(155,.72,.62)})"></div>
        <div class="barlab"><span>0</span><span>max</span></div>
        <div class="hint" style="margin-top:8px">Betweenness: share of shortest regulatory paths passing through the node — marks bottleneck / relay regulators, which can differ from the biggest hubs.</div>`;
+    else if(mode==='sign') L.innerHTML=
+      `<div class="k"><span class="dot" style="background:${SIGNCOL.a}"></span>Activation →</div>
+       <div class="k"><span class="dot" style="background:${SIGNCOL.r}"></span>Repression ⊣</div>
+       <div class="k"><span class="dot" style="background:${SIGNCOL.d}"></span>Dual</div>
+       <div class="k"><span class="dot" style="background:${SIGNCOL.u}"></span>Unknown</div>
+       <div class="hint" style="margin-top:8px">Mode of regulation from the curated (literature) network. Click an edge to see its PubMed references and evidence.</div>`;
     else L.innerHTML=
       `<div class="bar" style="background:linear-gradient(90deg,#52525b,#92400e,#b45309,#d97706,#f5a524)"></div>
        <div class="barlab"><span>TU only</span><span>4 organisms</span></div>
@@ -472,11 +584,11 @@
 
   function expandRegulon(id){
     const outs=(G.outAdj.get(id)||[]); const add=[];
-    outs.forEach(([T,c])=>{
+    outs.forEach(([T,c,sign,ei])=>{
       if(T===id)return;
       if(cy.getElementById(T).empty()) add.push(mkNode(T, G.byId.get(T)));
       if(cy.getElementById('r_'+id+'>'+T).empty())
-        add.push({data:{id:'r_'+id+'>'+T,source:id,target:T,c}});
+        add.push({data:{id:'r_'+id+'>'+T,source:id,target:T,c,sign:sign||null,ei:ei}});
     });
     if(add.length) cy.add(add);
     applyMode(mode);
@@ -503,6 +615,25 @@
 
   const drawer=document.getElementById('drawer');
   function closeDrawer(){ drawer.classList.remove('open'); if(cy) cy.elements().removeClass('hot faded'); }
+  function openEdgeDrawer(edge){
+    const ei=edge.data('ei'); const meta=(G.emeta&&ei!=null)?G.emeta[ei]:null; if(!meta)return;
+    const s=meta.s, t=meta.t, sign=meta.sign, pmids=meta.pmids||[];
+    const ev=(G.ev&&ei!=null)?G.ev[ei]:'';
+    document.getElementById('dacc').innerHTML=`${dispOf(s)} <span style="color:${SIGNCOL[sign]}">${sign==='r'?'⊣':(sign==='a'?'→':'·')}</span> ${dispOf(t)}`;
+    const tag=document.getElementById('dtag'); tag.textContent=SIGNNAME[sign]||'Unknown';
+    tag.style.background=SIGNCOL[sign]||SIGNCOL.u; tag.style.color='#04121f';
+    const refs=pmids.length
+      ? pmids.map(p=>`<a href="https://pubmed.ncbi.nlm.nih.gov/${p}/" target="_blank" rel="noopener" style="color:var(--inter);text-decoration:none">${p}</a>`).join(', ')
+      : '—';
+    document.getElementById('dbody').innerHTML=`
+      <div class="stat"><span>Regulator</span><span class="v">${dispOf(s)}</span></div>
+      <div class="stat"><span>Target</span><span class="v">${dispOf(t)}</span></div>
+      <div class="stat"><span>Mode</span><span class="v" style="color:${SIGNCOL[sign]}">${SIGNNAME[sign]||'Unknown'}</span></div>
+      <h4>PubMed reference(s)</h4><div style="font-size:12px;line-height:1.8">${refs}</div>
+      ${ev?`<h4>Evidence</h4><div style="font-size:12px;line-height:1.5;color:var(--dim)">${ev}${ev.length>=270?'…':''}</div>`:''}
+      <div class="hint" style="margin-top:14px">Curated interaction (literature-reported). Click a node for its details, or the background to close.</div>`;
+    drawer.classList.add('open');
+  }
   function openDrawer(id){
     const n=G.byId.get(id); if(!n)return;
     ensureBetweenness(G);
@@ -517,6 +648,10 @@
       ${name!==id?`<div class="stat"><span>Accession</span><span class="v mono" style="font-weight:500">${id}</span></div>`:''}
       ${prod?`<div class="stat"><span>Function</span><span class="v" style="font-weight:500;max-width:205px">${prod}</span></div>`:''}
       <div class="stat"><span>Is a TF?</span><span class="v">${n.tf?'Yes':'No'}</span></div>
+      ${(litFuncOf(name))?`<div style="margin:10px 0 2px;padding:9px 10px;background:var(--rail2);border:1px solid var(--line);border-radius:7px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--faint);margin-bottom:4px">Regulatory role · literature</div>
+        <div style="font-size:12px;line-height:1.5">${litFuncOf(name)[0]}.</div>
+        <div style="font-size:10.5px;color:var(--faint);margin-top:5px">${LITREF[litFuncOf(name)[1]]}. Reported function of the ortholog, not an enrichment computed here.</div></div>`:''}
       <div class="stat"><span>Genes it regulates</span><span class="v">${n.out}</span></div>
       <div class="stat"><span>Regulators controlling it</span><span class="v">${n.in}</span></div>
       <div class="stat"><span>Betweenness</span><span class="v">${(G.btw.get(id)/G.maxBtw).toFixed(3)}</span></div>
@@ -698,6 +833,54 @@
   }
 
   // ---------- hub-family heatmap ----------
+  // ---------- Gene Ontology panel (activates when GO annotation is present) ----------
+  // Expected data contract (added by the generator once GO terms are available):
+  //   raw.go = { "<nodeId>": ["GO:0006355 regulation of transcription", ...], ... }
+  let goColorOn=false, goTermFilter="";
+  const GOPAL=['#38bdf8','#f5a524','#c084fc','#34d399','#f472b6','#facc15','#fb923c','#a3e635','#22d3ee','#e879f9','#fca5a5','#60a5fa'];
+  const goColors=new Map();
+  const goColorFor=t=>{ if(!goColors.has(t)) goColors.set(t, GOPAL[goColors.size%GOPAL.length]); return goColors.get(t); };
+  const goPrimary=id=>{ const a=G.go&&G.go[id]; return a&&a.length?a[0]:null; };
+  function setupGO(raw){
+    G.go = raw.go || null;
+    const seg=document.getElementById('goMode'), sel=document.getElementById('goFilter'), hint=document.getElementById('goHint');
+    const has = !!(G.go && Object.keys(G.go).length);
+    seg.querySelectorAll('button').forEach(b=>{ b.disabled=!has; b.style.opacity=has?'':'0.5'; });
+    sel.disabled=!has; sel.style.opacity=has?'':'0.5';
+    // reset to Off on each genome
+    goColorOn=false; goTermFilter="";
+    seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on', x.dataset.g==='off'));
+    if(!has){
+      sel.innerHTML='<option value="">All GO terms</option>';
+      hint.textContent='No GO annotation loaded for this genome yet. Regenerate with GO terms per gene to color and filter nodes by biological function.';
+      return;
+    }
+    const terms=new Map();
+    Object.values(G.go).forEach(arr=>arr.forEach(t=>terms.set(t,(terms.get(t)||0)+1)));
+    const sorted=[...terms.entries()].sort((a,b)=>b[1]-a[1]);
+    sel.innerHTML='<option value="">All GO terms</option>'+sorted.map(([t,n])=>`<option value="${t}">${t} (${n})</option>`).join('');
+    hint.textContent=`${Object.keys(G.go).length} genes annotated with ${terms.size} GO terms. Color by GO, or filter to one term.`;
+  }
+  function applyGO(){
+    if(!cy||!G) return;
+    if(goColorOn && G.go){
+      cy.batch(()=>cy.nodes().forEach(n=>{ const t=goPrimary(n.id());
+        n.style('background-color', t?goColorFor(t):'#33465f'); }));
+    } else { applyMode(mode); }
+    // term filter: fade nodes lacking the selected term
+    cy.batch(()=>cy.nodes().forEach(n=>{
+      if(!goTermFilter){ n.removeClass('gofade'); return; }
+      const a=G.go&&G.go[n.id()];
+      n.toggleClass('gofade', !(a&&a.indexOf(goTermFilter)>=0));
+    }));
+  }
+  document.querySelectorAll('#goMode button').forEach(b=>b.onclick=()=>{
+    if(b.disabled) return;
+    document.querySelectorAll('#goMode button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on'); goColorOn=(b.dataset.g==='color'); applyGO();
+  });
+  document.getElementById('goFilter').addEventListener('change',e=>{ goTermFilter=e.target.value; applyGO(); });
+
   const FAMPAL=['#38bdf8','#f5a524','#c084fc','#34d399','#f472b6','#facc15','#fb923c',
     '#a3e635','#22d3ee','#e879f9','#fca5a5','#60a5fa','#fcd34d','#4ade80'];
   const famColor=new Map();
@@ -744,17 +927,15 @@
   function renderGList(filter){
     const q=(filter||'').toLowerCase();
     const box=document.getElementById('glist');
-    const rows=manifest.filter(m=>m.id.toLowerCase().includes(q)).slice(0,300);
-    box.innerHTML=rows.map(m=>
-      `<div class="gi${m.id===curId?' on':''}" data-id="${m.id}">
-        <span class="mono">${m.id}${m.local?'<span class="lt">LOCAL</span>':''}</span><span class="e">${m.edges}</span></div>`).join('')
+    const rows=manifest.filter(m=>m.id.toLowerCase().includes(q) || (m.label&&m.label.toLowerCase().includes(q))).slice(0,300);
+    box.innerHTML=rows.map(m=>{
+      const primary = m.label ? m.label : m.id;
+      const sub = m.label ? `<span class="gsub mono">${m.id}</span>` : '';
+      return `<div class="gi${m.id===curId?' on':''}" data-id="${m.id}">
+        <span class="gname">${primary}${m.local?'<span class="lt">LOCAL</span>':''}${sub}</span><span class="e">${m.edges}</span></div>`;
+    }).join('')
       || `<div class="gi" style="cursor:default;color:var(--faint)">no matches</div>`;
-    box.querySelectorAll('.gi[data-id]').forEach(el=>el.onclick=async()=>{
-      document.getElementById('splash').style.display='flex';
-      document.getElementById('splash').textContent='Loading '+el.dataset.id+'…';
-      try{ showGenome(await loadGenome(el.dataset.id)); renderGList(document.getElementById('gfilter').value); }
-      catch(err){ document.getElementById('splash').textContent='Could not load '+el.dataset.id; }
-    });
+    box.querySelectorAll('.gi[data-id]').forEach(el=>el.onclick=()=>openGenome(el.dataset.id,'pred'));
   }
   document.getElementById('gfilter').addEventListener('input',e=>renderGList(e.target.value));
   document.getElementById('cmpSel').addEventListener('change',async e=>{
@@ -836,7 +1017,7 @@
     renderGList(document.getElementById('gfilter').value);
     if(added>0){
       st.innerHTML=`<b style="color:#34d399">+${added}</b> genome(s) loaded this session.`;
-      if(firstNew) showGenome(await loadGenome(firstNew));
+      if(firstNew) await openGenome(firstNew,'pred');
     } else if(derived){
       st.innerHTML='Nothing loaded: this contains the <b>derived analyses</b> '
         +'(hubs / coregulators / cascades), not the network. Load the '
@@ -853,7 +1034,7 @@
       const man=await loadManifest(); manifest=man.genomes;
       renderGList('');
       document.getElementById('splash').textContent='Pick a genome in the left panel.';
-      if(manifest.length) { showGenome(await loadGenome(manifest[0].id)); renderGList(''); }
+      if(manifest.length) { await openGenome(manifest[0].id,'pred'); renderGList(''); }
     }catch(err){
       document.getElementById('splash').innerHTML=
         'Could not load the manifest.<br>If you opened the file directly, serve it with <code>python -m http.server</code>.';

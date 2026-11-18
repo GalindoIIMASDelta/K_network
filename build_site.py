@@ -55,6 +55,37 @@ def parse_gff(path):
             if locus: idx.setdefault(locus, rec)
     return idx
 
+def parse_strain(path):
+    """Extract strain / isolate from a GFF 'region' feature, if present."""
+    with open(path) as fh:
+        for ln in fh:
+            if ln.startswith("#"):
+                continue
+            c = ln.rstrip("\n").split("\t")
+            if len(c) < 9 or c[2] != "region":
+                continue
+            a = {}
+            for kv in c[8].split(";"):
+                if "=" in kv:
+                    k, v = kv.split("=", 1); a[k] = unquote(v)
+            return a.get("strain") or a.get("isolate") or None
+    return None
+
+def load_name_table(path):
+    """Optional TSV/CSV: accession<TAB or ,>display name  ->  {accession: name}."""
+    tbl = {}
+    if not path or not os.path.exists(path):
+        return tbl
+    with open(path) as fh:
+        for ln in fh:
+            ln = ln.rstrip("\n")
+            if not ln or ln.startswith("#"):
+                continue
+            parts = ln.split("\t") if "\t" in ln else ln.split(",", 1)
+            if len(parts) >= 2:
+                tbl[parts[0].strip()] = parts[1].strip()
+    return tbl
+
 def label_for(nid, idx):
     """Return (display_label, product). Handles 'A/B' and 'A-B' complexes."""
     if "/" in nid or "-" in nid:
@@ -202,6 +233,7 @@ def main():
     ap.add_argument("--pfam", default="", help="InterProScan TSV dir or file for TF-family (Pfam) of hubs")
     ap.add_argument("--hubtop", type=int, default=15, help="number of top hubs for the family heatmap")
     ap.add_argument("--lit", action="store_true", help="fill hub families from the built-in literature table when Pfam is missing (needs --gff gene symbols)")
+    ap.add_argument("--names", default="", help="optional table (accession<TAB>display name) to override the genome label shown in the selector")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--only", default="")
     args = ap.parse_args()
@@ -213,6 +245,7 @@ def main():
         files = files[:args.limit]
 
     datadir = os.path.join(args.out, "data"); os.makedirs(datadir, exist_ok=True)
+    name_table = load_name_table(args.names)
     manifest = []
     for i, f in enumerate(files, 1):
         acc = accession(f)
@@ -221,6 +254,7 @@ def main():
             continue
         g["genome"] = acc
         named = 0
+        strain = None
         gff = find_gff(acc, args.gff)
         if gff:
             gidx = parse_gff(gff)
@@ -231,6 +265,11 @@ def main():
                     names[nid] = [lab, prod]; named += 1
             if names:
                 g["names"] = names
+            strain = parse_strain(gff)
+        # genome display label: explicit table > strain from GFF > accession
+        label = name_table.get(acc) or (("strain " + strain) if strain else None)
+        if label:
+            g["label"] = label
         # --- TF family of the top hubs (for the family heatmap) ---
         # Primary source: Pfam (InterProScan). Fallback: literature table by gene symbol.
         hubfam = None
@@ -257,7 +296,8 @@ def main():
             json.dump(g, out, separators=(",", ":"))
         manifest.append({"id": acc, "tfs": g["stats"]["tfs"],
                          "targets": g["stats"]["targets"], "edges": g["stats"]["edges"],
-                         "named": named, "hubfam": hubfam})
+                         "named": named, "hubfam": hubfam,
+                         "label": g.get("label"), "strain": strain})
         if i % 200 == 0:
             print(f"  ...{i}/{len(files)}", file=sys.stderr)
 
